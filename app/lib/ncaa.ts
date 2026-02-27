@@ -72,9 +72,9 @@ function parseNcaaDate(raw: string): string {
 
 function makeTeam(t: NcaaTeam, fallbackId: string): Team {
   return {
-    id: t.names?.seo ?? fallbackId,
-    name: t.names?.full ?? t.names?.short ?? fallbackId,
-    abbreviation: t.names?.char6 ?? t.names?.char8 ?? fallbackId,
+    id: t.names?.seo || fallbackId,
+    name: t.names?.full || t.names?.short || fallbackId,
+    abbreviation: t.names?.char6 || t.names?.char8 || fallbackId,
     record: t.record,
   };
 }
