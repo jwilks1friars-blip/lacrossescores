@@ -1,116 +1,130 @@
 import { Game, GameStatus, Team } from "./types";
 
-const NCAA_API_BASE = "https://ncaa-api.henrygd.me";
+const ESPN_API =
+  "https://site.api.espn.com/apis/site/v2/sports/lacrosse/mens-college-lacrosse";
 
-// ─── NCAA API response types ──────────────────────────────────────────────────
+// ─── ESPN API response types ───────────────────────────────────────────────
 
-interface NcaaNames {
-  char6: string;
-  char8: string;
-  short: string;
-  seo: string;
-  full: string;
+interface EspnTeamInfo {
+  id: string;
+  shortDisplayName: string;
+  displayName: string;
+  abbreviation: string;
+  logo?: string;
 }
 
-interface NcaaTeam {
-  names: NcaaNames;
-  score: string;
-  winner?: boolean;
-  record?: string;
-  seed?: string;
+interface EspnCompetitor {
+  homeAway: "home" | "away";
+  team: EspnTeamInfo;
+  score?: string;
+  records?: Array<{ type: string; summary: string }>;
 }
 
-interface NcaaVenue {
+interface EspnStatusType {
   name: string;
-  city: string;
-  state: string;
+  state: "pre" | "in" | "post";
+  completed: boolean;
+  detail: string;
+  shortDetail: string;
 }
 
-interface NcaaGame {
-  gameID: string;
-  startDate: string;    // "MM/DD/YYYY"
-  startTime: string;    // "H:MM PM ET" | "TBD"
-  startDateTimestamp?: number;
-  gameState: "pre" | "live" | "final";
-  currentPeriod?: string;
-  contestClock?: string;
-  home: NcaaTeam;
-  away: NcaaTeam;
-  venue?: NcaaVenue;
+interface EspnStatus {
+  clock: number;
+  displayClock: string;
+  period: number;
+  type: EspnStatusType;
 }
 
-interface NcaaScoreboardResponse {
-  games?: Array<{ game: NcaaGame }>;
+interface EspnVenue {
+  fullName?: string;
+  address?: { city?: string; state?: string };
 }
 
-interface NcaaScheduleGame {
-  game: NcaaGame;
+interface EspnCompetition {
+  id: string;
+  date: string;
+  competitors: EspnCompetitor[];
+  status: EspnStatus;
+  venue?: EspnVenue;
 }
 
-interface NcaaScheduleResponse {
-  games?: NcaaScheduleGame[];
+interface EspnEvent {
+  id: string;
+  competitions: EspnCompetition[];
 }
 
-// ─── Transformers ─────────────────────────────────────────────────────────────
-
-function mapStatus(state: string): GameStatus {
-  switch (state) {
-    case "live":
-      return "live";
-    case "final":
-      return "final";
-    default:
-      return "scheduled";
-  }
+interface EspnScoreboardResponse {
+  events?: EspnEvent[];
 }
 
-/** "MM/DD/YYYY" → "YYYY-MM-DD" */
-function parseNcaaDate(raw: string): string {
-  const [m, d, y] = raw.split("/");
-  return `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
+// ─── Transformers ─────────────────────────────────────────────────────────
+
+function mapStatus(s: EspnStatusType): GameStatus {
+  if (s.completed) return "final";
+  if (s.state === "in") return "live";
+  if (s.name === "STATUS_POSTPONED" || s.name === "STATUS_CANCELED") return "postponed";
+  return "scheduled";
 }
 
-function makeTeam(t: NcaaTeam, fallbackId: string): Team {
+function makeTeam(c: EspnCompetitor): Team {
+  const record = c.records?.find((r) => r.type === "total")?.summary;
   return {
-    id: t.names?.seo || fallbackId,
-    name: t.names?.full || t.names?.short || fallbackId,
-    abbreviation: t.names?.char6 || t.names?.char8 || fallbackId,
-    record: t.record,
+    id: c.team.id,
+    name: c.team.shortDisplayName || c.team.displayName,
+    abbreviation: c.team.abbreviation,
+    logo: c.team.logo,
+    record,
   };
 }
 
-function transformGame(g: NcaaGame): Game {
-  const status = mapStatus(g.gameState);
-  const date = parseNcaaDate(g.startDate);
+function periodLabel(period: number): string {
+  if (period <= 4) return `Q${period}`;
+  return `OT${period > 5 ? period - 4 : ""}`;
+}
+
+function transformEvent(event: EspnEvent): Game {
+  const comp = event.competitions[0];
+  const home = comp.competitors.find((c) => c.homeAway === "home")!;
+  const away = comp.competitors.find((c) => c.homeAway === "away")!;
+  const status = comp.status;
+  const gameStatus = mapStatus(status.type);
+
+  const date = comp.date.split("T")[0];
+  const timeStr = new Date(comp.date).toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: "America/New_York",
+    timeZoneName: "short",
+  });
 
   let venue: string | undefined;
-  if (g.venue) {
-    venue = `${g.venue.name}, ${g.venue.city} ${g.venue.state}`;
+  if (comp.venue?.fullName) {
+    const { city, state } = comp.venue.address ?? {};
+    venue = [comp.venue.fullName, city, state].filter(Boolean).join(", ");
   }
 
   return {
-    id: g.gameID,
-    homeTeam: makeTeam(g.home, "HOME"),
-    awayTeam: makeTeam(g.away, "AWAY"),
-    homeScore: parseInt(g.home.score ?? "0", 10) || 0,
-    awayScore: parseInt(g.away.score ?? "0", 10) || 0,
-    status,
-    period: g.currentPeriod,
-    clock: g.contestClock,
+    id: comp.id,
+    homeTeam: makeTeam(home),
+    awayTeam: makeTeam(away),
+    homeScore: parseInt(home.score ?? "0", 10) || 0,
+    awayScore: parseInt(away.score ?? "0", 10) || 0,
+    status: gameStatus,
+    period: status.period > 0 ? periodLabel(status.period) : undefined,
+    clock: gameStatus === "live" ? status.displayClock : undefined,
     date,
-    time: g.startTime !== "TBD" ? g.startTime : undefined,
+    time: timeStr,
     venue,
     league: "NCAA D1",
   };
 }
 
-// ─── Fetch helpers ────────────────────────────────────────────────────────────
+// ─── Fetch helpers ─────────────────────────────────────────────────────────
 
-async function ncaaFetch<T>(path: string, revalidate = 30): Promise<T | null> {
+async function espnFetch<T>(path: string, revalidate = 30): Promise<T | null> {
   try {
-    const res = await fetch(`${NCAA_API_BASE}${path}`, {
+    const res = await fetch(`${ESPN_API}${path}`, {
       next: { revalidate },
-      headers: { "User-Agent": "lacrossescores.com/1.0" },
     });
     if (!res.ok) return null;
     return res.json() as Promise<T>;
@@ -119,44 +133,32 @@ async function ncaaFetch<T>(path: string, revalidate = 30): Promise<T | null> {
   }
 }
 
-function dateSegments(date: Date) {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, "0");
-  const d = String(date.getDate()).padStart(2, "0");
-  return { y, m, d };
-}
-
-// ─── Public API ───────────────────────────────────────────────────────────────
+// ─── Public API ────────────────────────────────────────────────────────────
 
 /** Fetch scoreboard for a specific date (defaults to today). */
 export async function fetchScoreboard(date: Date = new Date()): Promise<Game[]> {
-  const { y, m, d } = dateSegments(date);
-  const data = await ncaaFetch<NcaaScoreboardResponse>(
-    `/scoreboard/lacrosse-men/d1/${y}/${m}/${d}/all-conf`,
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  const data = await espnFetch<EspnScoreboardResponse>(
+    `/scoreboard?dates=${y}${m}${d}&limit=100`,
     30
   );
-  if (!data?.games?.length) return [];
-  return data.games.map((g) => transformGame(g.game));
+  if (!data?.events?.length) return [];
+  return data.events.map(transformEvent);
 }
 
-/**
- * Fetch the full season schedule. Returns all games (past, present, future).
- * Cached for 10 minutes since it rarely changes mid-day.
- */
+/** Fetch the full season schedule. */
 export async function fetchSchedule(): Promise<Game[]> {
-  const year = new Date().getFullYear();
-  const data = await ncaaFetch<NcaaScheduleResponse>(
-    `/schedule/lacrosse-men/d1/${year}/all-conf`,
+  const data = await espnFetch<EspnScoreboardResponse>(
+    `/scoreboard?limit=300`,
     600
   );
-  if (!data?.games?.length) return [];
-  return data.games.map((g) => transformGame(g.game));
+  if (!data?.events?.length) return [];
+  return data.events.map(transformEvent);
 }
 
-/**
- * Fetch scoreboards for a range of dates and return combined results.
- * Used when the schedule endpoint isn't available or for recent results.
- */
+/** Fetch scoreboards for a range of dates and return combined results. */
 export async function fetchScoreboardRange(dates: Date[]): Promise<Game[]> {
   const results = await Promise.all(dates.map((d) => fetchScoreboard(d)));
   return results.flat();
